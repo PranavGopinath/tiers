@@ -106,26 +106,41 @@ describe('Game Logic Engine', () => {
     expect(featureTypes).toContain('WATER');
   });
 
-  it('returns meeples and awards points when a city chain is completed on Move 8', () => {
+  it('returns meeples and awards points only when the 3-tile city chain is completed on Move 8', () => {
     let state = createInitialState();
     for (let i = 0; i < 7; i++) {
       state = applyMove(state, CANONICAL_MOVES[i]);
     }
 
-    // Before Move 8 (CITY_TWO_EDGES_STRAIGHT at (1, -1) rot 1):
-    // Player 2 has a meeple on (0, -1) CITY and 1 meeple available
+    // Move 2 (CITY_CORNER_A at (0, -1) rot 1) connects S to (0,0) N, but E is still open!
+    // So no city is completed yet (completedChains === 0), and Player 2 only has +2 from Move 4 (WATERFALL_BRIDGE).
+    expect(state.completedChains).toBe(0);
+    expect(state.players[2].score).toBe(2);
     expect(state.board['0,-1'].meeple?.playerId).toBe(2);
     const p2ScoreBefore = state.players[2].score;
     const p2MeeplesBefore = state.players[2].meeplesAvailable;
 
-    // Apply Move 8
+    // Apply Move 8 (CITY_TWO_EDGES_STRAIGHT at (1, -1) rot 1):
+    // Closes the 3-tile city [(0,0), (0,-1), (1,-1)] -> +6 pts for Player 2 and returns the meeple
     state = applyMove(state, CANONICAL_MOVES[7]);
 
-    // 3-tile city [(0,0), (0,-1), (1,-1)] is completed -> 3 * 2 = 6 pts for Player 2
     expect(state.completedChains).toBe(1);
     expect(state.players[2].score).toBe(p2ScoreBefore + 6);
     expect(state.players[2].meeplesAvailable).toBe(p2MeeplesBefore + 1);
     expect(state.board['0,-1'].meeple).toBeNull();
+  });
+
+  it('does not award city points on Move 2 when CITY_CORNER_A still has an open edge, and scores when Move 8 closes it', () => {
+    let state = createInitialState();
+    // Move 1: Player 1 places ROAD_CURVE_A at (1, 0) without a meeple
+    state = applyMove(state, { x: 1, z: 0, rotation: 1 });
+    expect(state.players[1].score).toBe(0);
+    expect(state.players[2].score).toBe(0);
+
+    // Move 2: Player 2 places CITY_CORNER_A at (0, -1) rot 1 (S connects to (0,0) N, but E is still open)
+    state = applyMove(state, { x: 0, z: -1, rotation: 1 });
+    expect(state.completedChains).toBe(0);
+    expect(state.players[2].score).toBe(0);
   });
 
   it('calculates bridge (+3) and waterfall (+3) bonuses on completed road and water chains', () => {

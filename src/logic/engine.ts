@@ -71,7 +71,10 @@ export function getIntraTileConnectedEdges(
     return ([0, 1, 2, 3] as DirIndex[]).filter((d) => edges[d] === 'ROAD');
   }
 
-  // WATER: 1-edge (LAKE/SPRING) returns [dir]; 2 or 3 edges connect through the tile
+  // WATER: 1-edge (LAKE/SPRING) or 3-way RIVER_JUNCTION terminates at center; 2-edge rivers connect through
+  if (spec.special === 'RIVER_JUNCTION') {
+    return [dir];
+  }
   return ([0, 1, 2, 3] as DirIndex[]).filter((d) => edges[d] === 'WATER');
 }
 
@@ -222,11 +225,11 @@ export function calculateChainPoints(
     return 2 * numTiles + 3 * waterfallCount;
   }
 
-  // Incomplete chain at game over (half points)
+  // Incomplete chain at game over (half points, rounded up so scores remain whole integers)
   if (chain.featureType === 'CITY' || chain.featureType === 'WATER') {
     return 1 * numTiles;
   }
-  return 0.5 * numTiles;
+  return Math.max(1, Math.ceil(0.5 * numTiles));
 }
 
 function getMajorityOwners(meeples: ChainMeeple[]): PlayerId[] {
@@ -235,6 +238,27 @@ function getMajorityOwners(meeples: ChainMeeple[]): PlayerId[] {
   for (const m of meeples) {
     if (m.playerId === 1) count1 += 1;
     else if (m.playerId === 2) count2 += 1;
+  }
+  const max = Math.max(count1, count2);
+  if (max === 0) return [];
+  const winners: PlayerId[] = [];
+  if (count1 === max) winners.push(1);
+  if (count2 === max) winners.push(2);
+  return winners;
+}
+
+function getTileMajorityOwners(
+  board: Record<string, PlacedTile>,
+  tileKeys: Set<string>,
+): PlayerId[] {
+  let count1 = 0;
+  let count2 = 0;
+  for (const tKey of tileKeys) {
+    const tile = board[tKey];
+    if (!tile || tile.turnPlaced <= 0) continue;
+    const placedBy: PlayerId = tile.turnPlaced % 2 === 1 ? 1 : 2;
+    if (placedBy === 1) count1 += 1;
+    else count2 += 1;
   }
   const max = Math.max(count1, count2);
   if (max === 0) return [];
@@ -494,8 +518,20 @@ export function applyMove(state: GameState, move: Move): GameState {
 
   board[coordKey(move.x, move.z)] = newTile;
 
-  // Evaluate all unique feature chains touched by the newly placed tile
-  // (Points are ONLY scored when a feature chain is completed, and half-points at the end of the game)
+  // 1. Immediate Elevation / New Level Bonus (+2 pts)
+  if (isElevationChanger(spec) || newTile.level !== 0 || newTile.crownLevel !== 0) {
+    players[activePlayer].score += 2;
+    events.push({
+      turn: state.turnNumber,
+      playerId: activePlayer,
+      points: 2,
+      reason: `Elevation bonus (+2) for placing ${spec.name}`,
+      featureType: 'ELEVATION',
+      completed: true,
+    });
+  }
+
+  // 2. Evaluate all unique feature chains touched by the newly placed tile
   const visitedSocketKeys = new Set<string>();
   const rotatedEdges = getRotatedEdges(spec, move.rotation);
 
@@ -520,29 +556,28 @@ export function applyMove(state: GameState, move: Move): GameState {
     if (chain.completed) {
       completedChains += 1;
 
-      if (chain.meeples.length > 0) {
-        const points = calculateChainPoints(board, chain, true);
-        const winners = getMajorityOwners(chain.meeples);
+      const points = calculateChainPoints(board, chain, true);
+      const winners =
+        chain.meeples.length > 0 ? getMajorityOwners(chain.meeples) : [activePlayer];
 
-        for (const winnerId of winners) {
-          players[winnerId].score += points;
-          events.push({
-            turn: state.turnNumber,
-            playerId: winnerId,
-            points,
-            reason: `Completed ${chain.featureType} chain (${chain.tileKeys.size} tiles)`,
-            featureType: chain.featureType,
-            completed: true,
-          });
-        }
+      for (const winnerId of winners) {
+        players[winnerId].score += points;
+        events.push({
+          turn: state.turnNumber,
+          playerId: winnerId,
+          points,
+          reason: `Completed ${chain.featureType} chain (${chain.tileKeys.size} tiles)`,
+          featureType: chain.featureType,
+          completed: true,
+        });
+      }
 
-        // Return all meeples on this completed chain to their owners
-        for (const m of chain.meeples) {
-          const tileWithMeeple = board[coordKey(m.x, m.z)];
-          if (tileWithMeeple && tileWithMeeple.meeple) {
-            players[m.playerId].meeplesAvailable += 1;
-            tileWithMeeple.meeple = null;
-          }
+      // Return all meeples on this completed chain to their owners
+      for (const m of chain.meeples) {
+        const tileWithMeeple = board[coordKey(m.x, m.z)];
+        if (tileWithMeeple && tileWithMeeple.meeple) {
+          players[m.playerId].meeplesAvailable += 1;
+          tileWithMeeple.meeple = null;
         }
       }
     }
@@ -571,42 +606,48 @@ export function applyMove(state: GameState, move: Move): GameState {
   const currentTile = gameOver ? null : DECK[nextDeckIndex];
   const turnNumber = state.turnNumber + 1;
 
-  // 4. End-game incomplete chain scoring when deck is exhausted
+  // 4. End-game incomplete chain scoring when deck is exhausted (all open features on the board)
   if (gameOver) {
     const scoredIncompleteSockets = new Set<string>();
     const placedTiles = Object.values(board).sort((a, b) => a.turnPlaced - b.turnPlaced);
 
     for (const tile of placedTiles) {
-      if (!tile.meeple) {
-        continue;
-      }
-      const socketKey = `${tile.x},${tile.z},${tile.meeple.edgeIndex}`;
-      if (scoredIncompleteSockets.has(socketKey)) {
-        continue;
-      }
+      const tileEdges = getRotatedEdges(tile.spec, tile.rotation);
+      for (const dir of [0, 1, 2, 3] as DirIndex[]) {
+        if (tileEdges[dir] === 'GRASS') {
+          continue;
+        }
+        const socketKey = `${tile.x},${tile.z},${dir}`;
+        if (scoredIncompleteSockets.has(socketKey)) {
+          continue;
+        }
 
-      const chain = traceFeatureChain(board, tile.x, tile.z, tile.meeple.edgeIndex);
-      if (!chain || chain.completed) {
-        continue;
-      }
+        const chain = traceFeatureChain(board, tile.x, tile.z, dir);
+        if (!chain || chain.completed) {
+          continue;
+        }
 
-      for (const nk of chain.nodeKeys) {
-        scoredIncompleteSockets.add(nk);
-      }
+        for (const nk of chain.nodeKeys) {
+          scoredIncompleteSockets.add(nk);
+        }
 
-      const points = calculateChainPoints(board, chain, false);
-      const winners = getMajorityOwners(chain.meeples);
+        const points = calculateChainPoints(board, chain, false);
+        const winners =
+          chain.meeples.length > 0
+            ? getMajorityOwners(chain.meeples)
+            : getTileMajorityOwners(board, chain.tileKeys);
 
-      for (const winnerId of winners) {
-        players[winnerId].score += points;
-        events.push({
-          turn: state.turnNumber,
-          playerId: winnerId,
-          points,
-          reason: `End-game incomplete ${chain.featureType} chain (${chain.tileKeys.size} tiles)`,
-          featureType: chain.featureType,
-          completed: false,
-        });
+        for (const winnerId of winners) {
+          players[winnerId].score += points;
+          events.push({
+            turn: state.turnNumber,
+            playerId: winnerId,
+            points,
+            reason: `End-game incomplete ${chain.featureType} chain (${chain.tileKeys.size} tiles)`,
+            featureType: chain.featureType,
+            completed: false,
+          });
+        }
       }
     }
   }

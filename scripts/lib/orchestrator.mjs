@@ -188,6 +188,9 @@ function withTimeout(promise, ms, label = 'operation') {
   });
 }
 
+/**
+ * @param {any} options
+ */
 export async function callModel({
   role,
   model = 'gemini-4-argon',
@@ -589,6 +592,7 @@ function formatToolResultForApi(res) {
  * Runs a multi-turn function-calling tool loop on the Interactions API.
  * Repeats until the model calls `finish` or `maxToolCalls` / `deadlineMs` is reached.
  * Under `ORCH_FAKE=1`, replays `fakeToolScript` if provided.
+ * @param {any} options
  */
 export async function runToolLoop({
   role = 'patcher',

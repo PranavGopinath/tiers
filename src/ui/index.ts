@@ -17,7 +17,7 @@ import type {
   Rotation,
   PlayerId,
 } from '../contracts';
-import { DIR_NAMES, getRotatedEdges } from '../contracts';
+import { DIR_NAMES, getRotatedEdges, isElevationChanger } from '../contracts';
 import { paintTile } from '../tiles/painter';
 
 export interface UIActions {
@@ -423,11 +423,32 @@ export function createGameUI(container: HTMLElement, actions: UIActions) {
               actions.onSelectMeepleOption(null);
               startPersonPointerDrag(ev, activeColor);
             });
+          } else {
+            circleEl.addEventListener('click', () => {
+              actions.onSelectMeepleOption({
+                edgeIndex: dir,
+                featureType,
+              });
+            });
           }
 
           dropLayer.appendChild(circleEl);
           availableTileSpots.push({ dir, featureType, el: circleEl });
         });
+      }
+
+      const dragHintEl = document.getElementById('ui-drag-hint');
+      if (dragHintEl) {
+        if (state.currentTile && availableTileSpots.length === 0 && isElevationChanger(state.currentTile)) {
+          dragHintEl.innerText =
+            'Elevation Hill (+2 pts): No person needed — place this tile on the board to change elevation and earn +2 points!';
+        } else if (state.currentTile && isElevationChanger(state.currentTile)) {
+          dragHintEl.innerText =
+            'Elevation Tile (+2 pts): Place to earn +2 level points! You can also drag a person to a circle to capture a feature.';
+        } else {
+          dragHintEl.innerText =
+            'Click and drag a person to one of the circles on the tile if you wish to capture that area';
+        }
       }
 
       // 5. Update Black Meeple Bar (5 minimal silhouette slots)
