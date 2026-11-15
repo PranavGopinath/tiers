@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { runToolLoop } from '../lib/orchestrator.mjs';
+import { toWireParts } from './wire.mjs';
 import { checkImportBoundaries } from '../gates/imports.mjs';
 import { captureShot, startDevServer, launchHardwareBrowser, captureGameplayScriptOnPage } from './capture.mjs';
 import { createSpikeFilmstrip as makeFilmstrip } from './judge.mjs';
@@ -193,6 +194,37 @@ export function buildSrcOutline(workDir) {
   };
   walk(srcDir);
   return entries.join('\n');
+}
+
+/**
+ * Runs the patcher on the orchestrator's `runToolLoop`, which takes plain tool declarations
+ * plus an `executeTool` dispatcher, and maps its result back to the shape this file uses.
+ */
+async function runPatcherLoop({ tools, fakeToolTurns, ...rest }) {
+  const handlers = new Map(tools.map((t) => [t.name, t.handler]));
+  const res = await runToolLoop({
+    ...rest,
+    input: toWireParts(rest.input),
+    tools: tools.map(({ handler, ...decl }) => ({ type: 'function', ...decl })),
+    fakeToolScript: fakeToolTurns,
+    executeTool: async ({ id, name, arguments: args }) => {
+      const handler = handlers.get(name);
+      if (typeof handler !== 'function') return { isError: true, error: `Unknown tool '${name}'` };
+      const out = await handler(args || {}, { id, name });
+      // Images go back as a content array, which the orchestrator passes through to the model.
+      if (out && typeof out === 'object' && Array.isArray(out.__mediaParts)) {
+        const { __mediaParts, ...result } = out;
+        return { content: toWireParts([{ type: 'text', text: JSON.stringify(result) }, ...__mediaParts]) };
+      }
+      return out;
+    },
+  });
+  return {
+    ...res,
+    lastInteractionId: res.interactionId,
+    toolCallsUsed: res.toolCallsCount,
+    history: res.toolCalls,
+  };
 }
 
 /**
@@ -800,7 +832,7 @@ export async function runPatcherIteration({
     : config.patcher?.maxToolCalls || 60;
   const deadlineMs = config.patcher?.deadlineMs || 1_200_000;
 
-  let loopRes = await runToolLoop({
+  let loopRes = await runPatcherLoop({
     role: 'patcher',
     model: config.model?.name || 'gemini-4-argon',
     thinking: 'high',
@@ -837,7 +869,7 @@ export async function runPatcherIteration({
   let accResult = runAcceptanceGate(workDir, config, options.runAcceptance);
   if (!accResult.ok) {
     // Give the agent one more bounded turn with the failing log (§3.5)
-    const repairRes = await runToolLoop({
+    const repairRes = await runPatcherLoop({
       role: 'patcher',
       model: config.model?.name || 'gemini-4-argon',
       thinking: 'high',

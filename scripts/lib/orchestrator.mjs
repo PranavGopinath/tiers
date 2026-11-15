@@ -196,7 +196,7 @@ export async function callModel({
   tools = undefined,
   systemInstruction = undefined,
   taskId = 'adhoc',
-  background = false,
+  background = undefined,
   maxOutputTokens = 65536,
   previousInteractionId = undefined,
   schema = undefined,
@@ -215,8 +215,11 @@ export async function callModel({
   const pricing = loadPricing(rootDir);
   const activeState = ensureTraceStateInitialized(state || { totalCostUsd: 0, totalCalls: 0 }, tracePath);
 
-  // Long or thinking: "high" calls always run with background: true
-  const effectiveBackground = Boolean(background || thinking === 'high');
+  // Long or thinking: "high" calls run with background: true, except calls carrying images or
+  // video: background interactions run on the -agent model, which rejects image input.
+  // An explicit background: false (e.g. a tool loop whose history holds images) always wins.
+  const effectiveBackground =
+    background !== false && !inputHasMedia(input) && Boolean(background || thinking === 'high');
 
   if (activeState.totalCalls + 1 > maxCalls || activeState.totalCostUsd >= budgetUsd) {
     const resumeCmd = `node scripts/smoke-orchestrator.mjs --resume --task ${taskId}`;
@@ -440,6 +443,16 @@ function extractInteractionOutputs(interaction) {
   return { parsed, rawText, functionCalls };
 }
 
+function inputHasMedia(input) {
+  if (!Array.isArray(input)) return false;
+  return input.some(
+    (part) =>
+      part?.type === 'image' ||
+      part?.type === 'video' ||
+      (part?.type === 'function_result' && inputHasMedia(part.result))
+  );
+}
+
 async function invokeLiveInteractionsApi({
   model,
   thinking,
@@ -619,6 +632,8 @@ export async function runToolLoop({
   const activeState = ensureTraceStateInitialized(state || { totalCostUsd: 0, totalCalls: 0 }, tracePath);
   const loopStartMs = Date.now();
   let currentInput = input;
+  // A continued conversation may already hold images we can't see, so it stays in the foreground.
+  let sawMedia = Boolean(previousInteractionId);
   let prevId = previousInteractionId;
   let toolCallsCount = 0;
   let turnIndex = 0;
@@ -684,6 +699,7 @@ export async function runToolLoop({
     const remainingLoopMs = Math.max(100, deadlineMs - elapsedMs);
     const effectivePollTimeout = Math.min(pollTimeoutMs, remainingLoopMs);
 
+    sawMedia = sawMedia || inputHasMedia(currentInput);
     const callRes = await callModel({
       role,
       model,
@@ -692,7 +708,7 @@ export async function runToolLoop({
       tools,
       systemInstruction,
       taskId: `${taskId}:turn${turnIndex}`,
-      background: true,
+      background: !sawMedia,
       previousInteractionId: prevId,
       pollTimeoutMs: effectivePollTimeout,
       rootDir,

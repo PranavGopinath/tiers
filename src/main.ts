@@ -118,6 +118,7 @@ function bootstrap() {
   let qualityMode: QualityMode = 'high';
   let selectedMeeple: { edgeIndex: DirIndex; featureType: Exclude<EdgeType, 'GRASS'> } | null = null;
   let demoRunning = false;
+  let legalMovesVisible = true;
 
   const getActiveRotationMoves = (): LegalMove[] => {
     if (state.gameOver || !state.currentTile) return [];
@@ -126,7 +127,7 @@ function bootstrap() {
 
   const syncAll = () => {
     const movesForRot = getActiveRotationMoves();
-    renderer.syncState(state, movesForRot);
+    renderer.syncState(state, legalMovesVisible ? movesForRot : []);
     ui.update(state, viewMode, themeMode, qualityMode, selectedMeeple, movesForRot);
   };
 
@@ -242,6 +243,20 @@ function bootstrap() {
       selectedMeeple = null;
       syncAll();
       return state;
+    },
+    botMove() {
+      if (state.gameOver || !state.currentTile) return state;
+      const move = chooseBotMove(state);
+      if (!move) return state;
+      state = { ...state, currentRotation: move.rotation };
+      state = engineApplyMove(state, move);
+      selectedMeeple = null;
+      syncAll();
+      return state;
+    },
+    showLegalMoves(on: boolean) {
+      legalMovesVisible = on;
+      syncAll();
     },
     runReplay(moves: Move[]) {
       let nextState = createInitialState();

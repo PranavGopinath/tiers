@@ -409,8 +409,8 @@ export interface InspectorAPI {
   setTheme(theme: ThemeMode): void;
   startDemo(): Promise<void>;
   renderAt(tSeconds: number): void;
-  playAt(tSeconds: number): void;
-  injectDefect(name: string | null): void;
+  playAt?(tSeconds: number): void;
+  injectDefect?(name: string | null): void;
   listShots(): ShotName[];
   captureShot(name: ShotName): string;
   getTileSheet(): HTMLCanvasElement;

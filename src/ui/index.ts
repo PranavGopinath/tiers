@@ -253,6 +253,8 @@ export function createGameUI(container: HTMLElement, actions: UIActions) {
 
   // Closing the modal lets the player inspect the finished board; Play Again moves to the top bar.
   let endModalDismissed = false;
+  // Inspection captures (?inspect=1) need an unobstructed board, so the modal never shows there.
+  const inspectMode = new URLSearchParams(window.location.search).get('inspect') === '1';
   const dismissEndModal = () => {
     endModalDismissed = true;
     modalBackdrop.style.display = 'none';
@@ -484,7 +486,7 @@ export function createGameUI(container: HTMLElement, actions: UIActions) {
 
       // 7. End Game Modal
       if (state.gameOver) {
-        modalBackdrop.style.display = endModalDismissed ? 'none' : 'flex';
+        modalBackdrop.style.display = endModalDismissed || inspectMode ? 'none' : 'flex';
         const winnerText = document.getElementById('ui-winner-text');
         const finalScores = document.getElementById('ui-final-scores');
         const restartBtn = document.getElementById('ui-restart-btn');
