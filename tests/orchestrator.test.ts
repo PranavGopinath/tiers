@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
+import * as orchestratorMod from '../scripts/lib/orchestrator.mjs';
+
+const {
   loadRoles,
   loadPricing,
   computeCostUsd,
@@ -12,7 +14,7 @@ import {
   callModel,
   runToolLoop,
   loadTraceState,
-} from '../scripts/lib/orchestrator.mjs';
+} = orchestratorMod as Record<string, any>;
 
 function createTempWorkspace() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tiers-orch-test-'));

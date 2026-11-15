@@ -3,11 +3,15 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  callModel,
+  callModel as rawCallModel,
   ensureTraceStateInitialized as ensurePersistentSpendState,
   createLoopWorktree,
   removeLoopWorktree,
 } from '../lib/orchestrator.mjs';
+import { toWireParts } from './wire.mjs';
+// Every model call goes through toWireParts so the API only sees fields it accepts.
+const callModel = (opts) => rawCallModel({ ...opts, input: toWireParts(opts.input) });
+
 import {
   loadLoopConfig,
   startDevServer,
@@ -245,6 +249,18 @@ export async function escalateToLeadArchitect({
 /**
  * Generates static `runs/loop/<runId>/dashboard.html` after every iteration (§5).
  */
+// Saves a non-best iteration's commit as refs/loop/<runId>/iter-<N> so its code stays retrievable
+// after the loop resets to the best commit.
+function keepIterationCommit(workDir, runId, iterNum, commitHash) {
+  if (!commitHash) return;
+  const safeId = String(runId).replace(/[^a-zA-Z0-9_-]/g, '_');
+  try {
+    execSync(`git update-ref "refs/loop/${safeId}/iter-${iterNum}" ${commitHash}`, { cwd: workDir, stdio: 'pipe' });
+  } catch {
+    // Keeping the ref is best effort; the loop continues from best either way.
+  }
+}
+
 // Merges the loop branch into baseBranch; on conflict, aborts and reports the files.
 function mergeLoopWorktree(rootDir, wtDir, runId, baseBranch = 'main') {
   const safeId = String(runId).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -319,6 +335,10 @@ export function generateDashboardHtml(runDir, loopState) {
 
   const iter0 = iterations.find((it) => it.iteration === 0) || iterations[0];
   const bestIterObj = iterations.find((it) => it.iteration === bestIteration) || iter0;
+  // The latest iteration as it actually came out, even if it was worse and the loop moved on from best.
+  const currentIterObj = iterations[iterations.length - 1] || iter0;
+  const currentOutcome = currentIterObj?.comparison?.outcome || (currentIterObj?.iteration === 0 ? 'baseline' : 'pending');
+  const currentLabel = `Current (Iter ${currentIterObj?.iteration ?? 0}, ${currentOutcome})`;
 
   const rubricItems = rubric?.items || [];
 
@@ -352,7 +372,7 @@ export function generateDashboardHtml(runDir, loopState) {
     })
     .join('\n');
 
-  // 2. Fidelity items: reference | iteration 0 | best, side by side, with best's open gaps
+  // 2. Fidelity items: reference | best | current, side by side, with open gaps for both
   const fidelityItems = rubricItems.filter((it) => it.kind === 'fidelity');
   const fidelityCardsHtml = fidelityItems
     .map((item) => {
@@ -361,10 +381,19 @@ export function generateDashboardHtml(runDir, loopState) {
       const refPath = (item.references || [])[0]
         ? path.resolve(loopState.workDir || DEFAULT_ROOT, item.references[0])
         : null;
-      const iter0Shot = iter0?.capture?.shotPaths?.[shotName];
       const bestShot = bestIterObj?.capture?.shotPaths?.[shotName];
+      const currentShot = currentIterObj?.capture?.shotPaths?.[shotName];
       const bestItemRes = bestIterObj?.verdicts?.items?.[item.id]?.perView?.[v];
-      const openGaps = bestItemRes?.gaps || [];
+      const currentItemRes = currentIterObj?.verdicts?.items?.[item.id]?.perView?.[v];
+      const gapList = (gaps) =>
+        gaps.length === 0
+          ? '<span class="pass-text">None (All high/medium gaps resolved)</span>'
+          : `<ul>${gaps
+              .map(
+                (g) =>
+                  `<li><span class="badge sev-${g.severity}">${g.severity}</span> <strong>[${escapeHtml(g.region || 'board')}]</strong> ${escapeHtml(g.description)}</li>`
+              )
+              .join('')}</ul>`;
 
       return `
         <div class="card fidelity-card">
@@ -376,33 +405,26 @@ export function generateDashboardHtml(runDir, loopState) {
               ${refPath ? `<img src="${relFromRunDir(refPath)}" alt="ref" />` : '<div class="missing">No ref</div>'}
             </div>
             <div>
-              <div class="img-label">Iteration 0 (${shotName})</div>
-              ${iter0Shot ? `<img src="${relFromRunDir(iter0Shot)}" alt="iter-0" />` : '<div class="missing">N/A</div>'}
+              <div class="img-label">Best (Iter ${bestIteration}, ${shotName}) <span class="badge ${bestItemRes?.verdict === 'pass' ? 'pass' : 'fail'}">${bestItemRes?.verdict || 'n/a'}</span></div>
+              ${bestShot ? `<img src="${relFromRunDir(bestShot)}" alt="best" />` : '<div class="missing">N/A</div>'}
             </div>
             <div>
-              <div class="img-label">Best (Iter ${bestIteration})</div>
-              ${bestShot ? `<img src="${relFromRunDir(bestShot)}" alt="best" />` : '<div class="missing">N/A</div>'}
+              <div class="img-label">${currentLabel} <span class="badge ${currentItemRes?.verdict === 'pass' ? 'pass' : 'fail'}">${currentItemRes?.verdict || 'n/a'}</span></div>
+              ${currentShot ? `<img src="${relFromRunDir(currentShot)}" alt="current" />` : '<div class="missing">N/A</div>'}
             </div>
           </div>
           <div class="gaps-list">
             <strong>Open Fidelity Gaps (Best Iter ${bestIteration}):</strong>
-            ${
-              openGaps.length === 0
-                ? '<span class="pass-text">None (All high/medium gaps resolved)</span>'
-                : `<ul>${openGaps
-                    .map(
-                      (g) =>
-                        `<li><span class="badge sev-${g.severity}">${g.severity}</span> <strong>[${escapeHtml(g.region || 'board')}]</strong> ${escapeHtml(g.description)}</li>`
-                    )
-                    .join('')}</ul>`
-            }
+            ${gapList(bestItemRes?.gaps || [])}
+            <strong>Open Fidelity Gaps (${currentLabel}):</strong>
+            ${gapList(currentItemRes?.gaps || [])}
           </div>
         </div>
       `;
     })
     .join('\n');
 
-  // 3. Shots & Page Shots: Iteration 0 vs Best
+  // 3. Shots & Page Shots: Best vs Current
   const allShotNames = [
     ...(config?.shots || []),
     'tileSheet',
@@ -410,20 +432,20 @@ export function generateDashboardHtml(runDir, loopState) {
   ];
   const shotsComparisonHtml = allShotNames
     .map((sName) => {
-      const s0 = iter0?.capture?.shotPaths?.[sName];
       const sBest = bestIterObj?.capture?.shotPaths?.[sName];
-      if (!s0 && !sBest) return '';
+      const sCurrent = currentIterObj?.capture?.shotPaths?.[sName];
+      if (!sBest && !sCurrent) return '';
       return `
         <div class="card">
           <h4>Shot: ${escapeHtml(sName)}</h4>
           <div class="side-by-side-2">
             <div>
-              <div class="img-label">Iteration 0</div>
-              ${s0 ? `<img src="${relFromRunDir(s0)}" />` : ''}
-            </div>
-            <div>
               <div class="img-label">Best (Iter ${bestIteration})</div>
               ${sBest ? `<img src="${relFromRunDir(sBest)}" />` : ''}
+            </div>
+            <div>
+              <div class="img-label">${currentLabel}</div>
+              ${sCurrent ? `<img src="${relFromRunDir(sCurrent)}" />` : ''}
             </div>
           </div>
         </div>
@@ -431,20 +453,20 @@ export function generateDashboardHtml(runDir, loopState) {
     })
     .join('\n');
 
-  // 4. Videos: Cinematic flight.webm + Gameplay videos in each view (Iter 0 vs Best)
+  // 4. Videos: Cinematic flight.webm + Gameplay videos in each view (Best vs Current)
   const videoCardsHtml = [];
-  if (iter0?.capture?.flightWebmPath || bestIterObj?.capture?.flightWebmPath) {
+  if (bestIterObj?.capture?.flightWebmPath || currentIterObj?.capture?.flightWebmPath) {
     videoCardsHtml.push(`
       <div class="card">
         <h4>Cinematic Timeline (flight.webm)</h4>
         <div class="side-by-side-2">
           <div>
-            <div class="img-label">Iteration 0</div>
-            ${iter0?.capture?.flightWebmPath ? `<video controls loop muted src="${relFromRunDir(iter0.capture.flightWebmPath)}"></video>` : 'N/A'}
-          </div>
-          <div>
             <div class="img-label">Best (Iter ${bestIteration})</div>
             ${bestIterObj?.capture?.flightWebmPath ? `<video controls loop muted src="${relFromRunDir(bestIterObj.capture.flightWebmPath)}"></video>` : 'N/A'}
+          </div>
+          <div>
+            <div class="img-label">${currentLabel}</div>
+            ${currentIterObj?.capture?.flightWebmPath ? `<video controls loop muted src="${relFromRunDir(currentIterObj.capture.flightWebmPath)}"></video>` : 'N/A'}
           </div>
         </div>
       </div>
@@ -454,19 +476,19 @@ export function generateDashboardHtml(runDir, loopState) {
   for (const script of config?.gameplay?.scripts || []) {
     const views = script.perView ? config?.gameplay?.views || ['2d', '3d'] : [script.startView || '2d'];
     for (const v of views) {
-      const v0 = iter0?.capture?.gameplay?.[script.id]?.[v]?.videoPath;
       const vBest = bestIterObj?.capture?.gameplay?.[script.id]?.[v]?.videoPath;
+      const vCurrent = currentIterObj?.capture?.gameplay?.[script.id]?.[v]?.videoPath;
       videoCardsHtml.push(`
         <div class="card">
           <h4>Gameplay: ${escapeHtml(script.id)} (${escapeHtml(v)})</h4>
           <div class="side-by-side-2">
             <div>
-              <div class="img-label">Iteration 0</div>
-              ${v0 ? `<video controls loop muted src="${relFromRunDir(v0)}"></video>` : 'Stills only'}
-            </div>
-            <div>
               <div class="img-label">Best (Iter ${bestIteration})</div>
               ${vBest ? `<video controls loop muted src="${relFromRunDir(vBest)}"></video>` : 'Stills only'}
+            </div>
+            <div>
+              <div class="img-label">${currentLabel}</div>
+              ${vCurrent ? `<video controls loop muted src="${relFromRunDir(vCurrent)}"></video>` : 'Stills only'}
             </div>
           </div>
         </div>
@@ -586,13 +608,13 @@ export function generateDashboardHtml(runDir, loopState) {
     </tbody>
   </table>
 
-  <h2>2. Fidelity Comparisons (Reference | Iteration 0 | Best)</h2>
+  <h2>2. Fidelity Comparisons (Reference | Best | Current)</h2>
   ${fidelityCardsHtml}
 
-  <h2>3. Still Shots & Page Shots (Iteration 0 vs Best)</h2>
+  <h2>3. Still Shots & Page Shots (Best vs Current)</h2>
   ${shotsComparisonHtml}
 
-  <h2>4. Motion & Gameplay Videos (Iteration 0 vs Best)</h2>
+  <h2>4. Motion & Gameplay Videos (Best vs Current)</h2>
   ${videoCardsHtml.join('\n')}
 
   <h2>5. Iteration History, Defects, Patcher Reports & Escalations</h2>
@@ -1087,7 +1109,7 @@ export async function runVisualLoop(options = {}) {
         startCommit: execSync('git rev-parse HEAD', { cwd: rootDir, encoding: 'utf8' }).trim(),
       };
 
-  const workDir = wtInfo.workDir;
+  const workDir = wtInfo.workDir || wtInfo.wtDir;
   const startCommit = wtInfo.startCommit;
   const baselineTestFiles = getBaselineTestFiles(workDir, startCommit);
 
@@ -1392,7 +1414,9 @@ export async function runVisualLoop(options = {}) {
           plateauCount = 0;
           isEscalatedAttempt = false;
         } else {
-          // Tie or worse: reset to bestCommit and record in triedLedger (§4.3)
+          // Tie or worse: keep this iteration's commit under a named ref, then continue from bestCommit
+          // and record the attempt in triedLedger (§4.3).
+          keepIterationCommit(workDir, runId, iterNum, patchRes.commitHash);
           resetToCommit(workDir, bestCommit);
           recordFailedAttemptInLedger(
             triedLedger,

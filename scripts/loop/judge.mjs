@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
-import { callModel, uploadMediaFile } from '../lib/orchestrator.mjs';
+import { callModel as rawCallModel, uploadMediaFile } from '../lib/orchestrator.mjs';
+import { toWireParts } from './wire.mjs';
+// Every model call goes through toWireParts so the API only sees fields it accepts.
+const callModel = (opts) => rawCallModel({ ...opts, input: toWireParts(opts.input) });
+
 
 export function formatTimestamp(seconds) {
   const totalSec = Math.max(0, Math.round(Number(seconds || 0)));
@@ -794,7 +798,7 @@ export async function judgeIteration(workDir, iterDir, captureManifest, config, 
     const inputParts = [];
 
     if (videoPath && fs.existsSync(videoPath)) {
-      const uploaded = await uploadMediaFile(videoPath, 'video/webm');
+      const uploaded = await uploadMediaFile({ filePath: videoPath, mimeType: 'video/webm' });
       inputParts.push({
         type: 'video',
         uri: uploaded.uri,
@@ -873,7 +877,7 @@ export async function judgeIteration(workDir, iterDir, captureManifest, config, 
 
       const inputParts = [];
       if (cap.videoPath && fs.existsSync(cap.videoPath)) {
-        const uploaded = await uploadMediaFile(cap.videoPath, 'video/webm');
+        const uploaded = await uploadMediaFile({ filePath: cap.videoPath, mimeType: 'video/webm' });
         inputParts.push({
           type: 'video',
           uri: uploaded.uri,
