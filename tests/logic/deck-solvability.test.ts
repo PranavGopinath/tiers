@@ -45,21 +45,37 @@ describe('20-Tile Deck Solvability Gate', () => {
     expect(finalState.board['0,-3']?.crownLevel).toBe(1);
   });
 
-  it('only scores points when a feature chain is completed during play and awards half-points at the end of the game', () => {
-    // Check mid-game before any chain completes (first 7 moves): scores remain 0
+  it('awards +2 points when a new level is added, full points when a feature is completed, and end-game points for open features', () => {
+    // Check after Move 1 (flat ROAD_CURVE_A before any chain completes): scores remain 0
     let midState = createInitialState();
-    for (let i = 0; i < 7; i++) {
-      midState = applyMove(midState, CANONICAL_MOVES[i]);
-    }
+    midState = applyMove(midState, CANONICAL_MOVES[0]);
     expect(midState.players[1].score).toBe(0);
     expect(midState.players[2].score).toBe(0);
+
+    // Move 2 places CITY_CORNER_A at (0,-1) rot 1: E city edge is still open, so 0 points yet!
+    midState = applyMove(midState, CANONICAL_MOVES[1]);
+    expect(midState.players[2].score).toBe(0);
+
+    // Move 3 places GRASS_HILL_A (adds level +1) -> +2 pts for Player 1
+    midState = applyMove(midState, CANONICAL_MOVES[2]);
+    expect(midState.players[1].score).toBe(2);
+
+    // Move 4 places WATERFALL_BRIDGE (adds level -1) -> +2 pts for Player 2
+    midState = applyMove(midState, CANONICAL_MOVES[3]);
+    expect(midState.players[2].score).toBe(2);
 
     const finalState = runReplay(CANONICAL_MOVES);
 
     const elevationEvents = finalState.events.filter((e) => e.featureType === 'ELEVATION');
-    expect(elevationEvents).toHaveLength(0);
+    expect(elevationEvents.length).toBeGreaterThanOrEqual(5);
+    for (const ev of elevationEvents) {
+      expect(ev.points).toBe(2);
+      expect(ev.completed).toBe(true);
+    }
 
-    const completedFeatureEvents = finalState.events.filter((e) => e.completed);
+    const completedFeatureEvents = finalState.events.filter(
+      (e) => e.completed && e.featureType !== 'ELEVATION',
+    );
     expect(completedFeatureEvents.length).toBeGreaterThanOrEqual(2);
 
     const incompleteEvents = finalState.events.filter((e) => !e.completed);

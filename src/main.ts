@@ -118,7 +118,8 @@ function bootstrap() {
   let qualityMode: QualityMode = 'high';
   let selectedMeeple: { edgeIndex: DirIndex; featureType: Exclude<EdgeType, 'GRASS'> } | null = null;
   let demoRunning = false;
-  let legalMovesVisible = true;
+
+  let showLegalOverlay = true;
 
   const getActiveRotationMoves = (): LegalMove[] => {
     if (state.gameOver || !state.currentTile) return [];
@@ -127,19 +128,40 @@ function bootstrap() {
 
   const syncAll = () => {
     const movesForRot = getActiveRotationMoves();
-    renderer.syncState(state, legalMovesVisible ? movesForRot : []);
+    renderer.syncState(state, showLegalOverlay ? movesForRot : []);
     ui.update(state, viewMode, themeMode, qualityMode, selectedMeeple, movesForRot);
+  };
+
+  const rotateCurrentTile = () => {
+    if (state.gameOver || !state.currentTile) return;
+    const nextRot = (((state.currentRotation + 1) % 4) as unknown) as Rotation;
+    state = { ...state, currentRotation: nextRot };
+    if (selectedMeeple) {
+      selectedMeeple = {
+        edgeIndex: (((selectedMeeple.edgeIndex + 1) % 4) as unknown) as DirIndex,
+        featureType: selectedMeeple.featureType,
+      };
+    }
+    syncAll();
   };
 
   const handlePlaceMove = (legalMove: LegalMove) => {
     if (state.gameOver || !state.currentTile) return;
     const prevPlayer = state.activePlayer;
+    const prevEventCount = state.events.length;
     let meepleChoice = selectedMeeple;
     if (meepleChoice) {
       const isAllowed = legalMove.legalMeepleEdges.some(
         (m) => m.edgeIndex === meepleChoice!.edgeIndex && m.featureType === meepleChoice!.featureType
       );
-      if (!isAllowed) meepleChoice = null;
+      if (!isAllowed) {
+        const sameFeatureEdge = legalMove.legalMeepleEdges.find(
+          (m) => m.featureType === meepleChoice!.featureType
+        );
+        meepleChoice = sameFeatureEdge
+          ? { edgeIndex: sameFeatureEdge.edgeIndex, featureType: sameFeatureEdge.featureType }
+          : null;
+      }
     }
     state = engineApplyMove(state, {
       x: legalMove.x,
@@ -149,10 +171,29 @@ function bootstrap() {
     });
     selectedMeeple = null;
     syncAll();
-    if (!state.gameOver && state.activePlayer !== prevPlayer) {
+
+    const newScoringEvents = state.events
+      .slice(prevEventCount)
+      .filter((ev) => ev.points > 0);
+    const p1Gained = newScoringEvents
+      .filter((ev) => ev.playerId === 1)
+      .reduce((sum, ev) => sum + ev.points, 0);
+    const p2Gained = newScoringEvents
+      .filter((ev) => ev.playerId === 2)
+      .reduce((sum, ev) => sum + ev.points, 0);
+    const parts: string[] = [];
+    if (p1Gained > 0) parts.push(`Player 1 +${p1Gained} pts`);
+    if (p2Gained > 0) parts.push(`Player 2 +${p2Gained} pts`);
+    const scoreSummary = parts.join(' • ');
+
+    if (state.gameOver) {
+      ui.showTurnBanner(
+        scoreSummary ? `${scoreSummary} — Game Over!` : 'Game Over — Final Tallies!'
+      );
+    } else if (scoreSummary) {
+      ui.showTurnBanner(`${scoreSummary} • Player ${state.activePlayer}'s Turn`);
+    } else if (state.activePlayer !== prevPlayer) {
       ui.showTurnBanner(`Player ${state.activePlayer}'s Turn`);
-    } else if (state.gameOver) {
-      ui.showTurnBanner('Game Over — Final Tallies!');
     }
   };
 
@@ -172,11 +213,7 @@ function bootstrap() {
       syncAll();
     },
     onRotateTile: () => {
-      if (state.gameOver || !state.currentTile) return;
-      const nextRot = (((state.currentRotation + 1) % 4) as unknown) as Rotation;
-      state = { ...state, currentRotation: nextRot };
-      selectedMeeple = null;
-      syncAll();
+      rotateCurrentTile();
     },
     onChangeTheme: (theme: ThemeMode) => {
       themeMode = theme;
@@ -210,12 +247,7 @@ function bootstrap() {
 
   window.addEventListener('keydown', (e) => {
     if (e.key === 'r' || e.key === 'R') {
-      if (!state.gameOver && state.currentTile) {
-        const nextRot = (((state.currentRotation + 1) % 4) as unknown) as Rotation;
-        state = { ...state, currentRotation: nextRot };
-        selectedMeeple = null;
-        syncAll();
-      }
+      rotateCurrentTile();
     } else if (e.key === 'v' || e.key === 'V') {
       viewMode = viewMode === '2d' ? '3d' : '2d';
       renderer.setView(viewMode);
@@ -245,17 +277,17 @@ function bootstrap() {
       return state;
     },
     botMove() {
-      if (state.gameOver || !state.currentTile) return state;
       const move = chooseBotMove(state);
-      if (!move) return state;
-      state = { ...state, currentRotation: move.rotation };
-      state = engineApplyMove(state, move);
-      selectedMeeple = null;
-      syncAll();
+      if (move) {
+        state = { ...state, currentRotation: move.rotation };
+        state = engineApplyMove(state, move);
+        selectedMeeple = null;
+        syncAll();
+      }
       return state;
     },
     showLegalMoves(on: boolean) {
-      legalMovesVisible = on;
+      showLegalOverlay = on;
       syncAll();
     },
     runReplay(moves: Move[]) {
@@ -268,9 +300,9 @@ function bootstrap() {
       syncAll();
       return state;
     },
-    setView(mode: ViewMode) {
+    setView(mode: ViewMode, instant?: boolean) {
       viewMode = mode;
-      renderer.setView(mode);
+      renderer.setView(mode, instant);
       syncAll();
     },
     getView() {
@@ -291,8 +323,6 @@ function bootstrap() {
       demoRunning = true;
       try {
         state = createInitialState();
-        viewMode = '2d';
-        renderer.setView('2d', true);
         syncAll();
 
         const stepDelay = inspectMode ? 10 : 90;
@@ -305,10 +335,12 @@ function bootstrap() {
           await new Promise((r) => setTimeout(r, stepDelay));
         }
 
-        // Trigger the 1.4s 2D -> 3D Rise transition
-        viewMode = '3d';
-        renderer.setView('3d');
-        syncAll();
+        // Trigger the 1.4s 2D -> 3D Rise transition if in 2D
+        if (viewMode === '2d') {
+          viewMode = '3d';
+          renderer.setView('3d');
+          syncAll();
+        }
         await renderer.startOrbitFlythrough(inspectMode ? 200 : 2800);
       } finally {
         demoRunning = false;
@@ -322,6 +354,13 @@ function bootstrap() {
       viewMode = tSeconds >= 3 ? '3d' : '2d';
       renderer.renderAt(tSeconds);
       ui.update(state, viewMode, themeMode, qualityMode, selectedMeeple, getActiveRotationMoves());
+    },
+    playAt(tSeconds: number) {
+      renderer.renderAt(tSeconds);
+      ui.update(state, viewMode, themeMode, qualityMode, selectedMeeple, getActiveRotationMoves());
+    },
+    injectDefect(_name: string | null) {
+      // No-op stub for defect injection hook
     },
     listShots(): ShotName[] {
       return [...REQUIRED_SHOTS];
